@@ -42,7 +42,7 @@ class LinkConfig(object):
         , 'user': 'backup'
         , 'password': '123456'}
     # operator mysql server information
-    mysqlConn = {'host': 'opsdb.db.local'  #10.59.95.46
+    mysqlConn = {'host': 'opsdb.db.local'
         , 'port': 3306
         , 'user': 'dbbackup'
         , 'passwd': 'dbbackup'
