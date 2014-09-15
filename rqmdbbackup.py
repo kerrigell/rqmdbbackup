@@ -19,6 +19,7 @@ import uuid
 import fcntl
 import subprocess
 
+
 try:
     import psutil
     # Kombu  replace pika
@@ -252,7 +253,7 @@ class DataBackup(object):
             , res['auth']
             , '${dbname}' if res['dump_type'] == 2 else '--all-databases'
             , ' | gzip > ${bak_path}'
-                            # ,'--result-file ${bak_path}'
+            # ,'--result-file ${bak_path}'
         ]
         # update shell mysql/mysqldump with basedir path's
         res['mysql'] = res.pop('client')
@@ -418,13 +419,13 @@ class DataBackup(object):
 
     @classmethod
     @logit('Calculate file MD5 >> %s')
-    def calcmd5(cls, filepath):
+    def calcmd5(cls,filepath):
         logger.log_info("Calculate %s" % filepath)
-        with open(filepath, 'rb') as f:
-            md5obj = hashlib.md5()
-            md5obj.update(f.read())
-            hash = md5obj.hexdigest()
-            return hash
+        md5 = hashlib.md5()
+        with open(sys.argv[1], 'rb') as f:
+            for chunk in iter(lambda: f.read(128 * md5.block_size), b''):
+                md5.update(chunk)
+            return md5.hexdigest()
 
     @logit("Update backup table >> %s")
     def update_db(self, dbid, **kwargs):
