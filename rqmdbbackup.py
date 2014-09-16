@@ -4,30 +4,31 @@
 # Purpose:
 # Created: 2014/5/15
 __author__ = 'Justin Ma'
-__version__ = '1.0.8'
-import os
-import sys
-import time
-import logging
-from logging.handlers import RotatingFileHandler
-import string
-import json
-import traceback
-from datetime import datetime, date, timedelta
-import hashlib
-import uuid
-import fcntl
-import subprocess
+__version__ = '1.0.9'
 
 
 try:
+    import os
+    import sys
+    import time
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import string
+    import json
+    import traceback
+    from datetime import datetime, date, timedelta
+    import hashlib
+    import uuid
+    import fcntl
+    import subprocess
+    # process list
     import psutil
     # Kombu  replace pika
     import pika
     import netifaces
 except Exception as e:
     print e
-    sys.exit(status=-1)
+    sys.exit(4)
 
 reload(sys)
 sys.setdefaultencoding('utf-8')
@@ -185,6 +186,7 @@ class DataBackup(object):
         proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         #使用subprocess.Popen导致子进程hang住原因是stdout产生的内容太多，超过了系统的buffer
         map(set_non_blockinf, [proc.stdout, proc.stderr])
+        time.sleep(1)
         while proc.poll() is None:
             try:
                 for line in [string.strip(i) for i in proc.stdout.readlines() if len(string.strip(i)) > 0]:
@@ -192,7 +194,9 @@ class DataBackup(object):
                     logger.log_info("result: %s" % line)
             except IOError:
                 pass
-        out.result += proc.stdout.readlines()
+        last_result=[string.strip(i) for i in proc.stdout.readlines()]
+        logger.log_info("result: %s" % last_result)
+        out.result += last_result
         out.returncode = proc.returncode
         stop = time.time()
         out.cost = stop - start
@@ -422,10 +426,12 @@ class DataBackup(object):
     def calcmd5(cls,filepath):
         logger.log_info("Calculate %s" % filepath)
         md5 = hashlib.md5()
-        with open(sys.argv[1], 'rb') as f:
+        with open(filepath, 'rb') as f:
             for chunk in iter(lambda: f.read(128 * md5.block_size), b''):
                 md5.update(chunk)
-            return md5.hexdigest()
+        res=md5.hexdigest()
+        logger.log_info("md5:%s" % res)
+        return  res
 
     @logit("Update backup table >> %s")
     def update_db(self, dbid, **kwargs):
@@ -696,8 +702,7 @@ class DataBackup(object):
                     query_count_sql = "select count(*) from t_database where ip='%s' and port=%s" % (
                     self.main_ip, bind_port)
                     count_res = self.mq_query.produce(ack=True, query=query_count_sql)
-                    if (not count_res) or count_res['count'] != 1 or count_res['result'] is None or count_res['result'][
-                        0] < 1:
+                    if (not count_res) or  count_res['result'] is None or count_res['result'][0][0] < 1:
                         logger.log_error(
                             "No enougth record in db for %s://%s:%s" % (proc_name, self.main_ip, bind_port))
                         continue
@@ -799,10 +804,13 @@ class RabbitMQ(object):
             exit(2)
 
     def close_channel(self, corr_id):
-        if self._channels.has_key(corr_id):
-            for item in self._channels[corr_id]:
-                if item: item.close()
-            self._channels.pop(corr_id)
+        try:
+            if self._channels.has_key(corr_id):
+                for item in self._channels[corr_id]:
+                    if item and item.is_open: item.close()
+                self._channels.pop(corr_id)
+        except Exception as e:
+            print e.message
 
 
     @logit('Send message to rabbit mq >> %s')
@@ -827,23 +835,22 @@ class RabbitMQ(object):
                               , body=message
                               , properties=pika.BasicProperties(**_pubblish_props) if ack else None
         )
-        if ack:
-            try:
+
+        try:
+            if ack:
                 while self._responses[corr_id] is None:
                     conn.process_data_events()
                 logger.log_info("[%s]=%s" % (corr_id, self._responses[corr_id]))
-                if self._responses[corr_id] is None:
-                    return None
-                else:
-                    return CallbackMQ.load_json(self._responses[corr_id])
-            except Exception as e:
-                logger.log_error("receiving returning value:%s" % e.message)
-                logger.log_error(traceback.format_exc())
-                return None
-            finally:
-                self.close_channel(corr_id)
-        else:
             self.close_channel(corr_id)
+        except Exception as e:
+            logger.log_error("receiving returning value:%s" % e.message)
+            logger.log_error(traceback.format_exc())
+        finally:
+            if self._responses[corr_id] is None:
+                return None
+            else:
+                return CallbackMQ.load_json(self._responses[corr_id])
+
 
 
     @logit('Accept message from rabbit mq >> %s')
