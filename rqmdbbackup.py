@@ -1,15 +1,16 @@
-#!/usr/bin/python
+#!/usr/bin/python2.7
 # coding:utf-8
 # Author:  Justin Ma
 # Purpose:
 # Created: 2014/5/15
 __author__ = 'Justin Ma'
-__version__ = '1.0.9'
+__version__ = '1.1.0'
 
 
 try:
     import os
     import sys
+    import errno
     import time
     import logging
     from logging.handlers import RotatingFileHandler
@@ -39,12 +40,12 @@ class LinkConfig(object):
     access privilges
     '''
     # rabbit mq server information
-    rqmconn = {'host': 'rabbitmq.backup.db.local'
+    rabbitmq_connect = {'host': 'rabbitmq.backup.db.local'
         , 'vhost': '/rqmbakup'
         , 'user': 'backup'
         , 'password': '123456'}
     # operator mysql server information
-    mysqlConn = {'host': 'opsdb.db.local'
+    info_connect = {'host': 'opsdb.db.local'
         , 'port': 3306
         , 'user': 'dbbackup'
         , 'passwd': 'dbbackup'
@@ -165,9 +166,9 @@ class DataBackup(object):
             if use_mq:
                 self.use_mq = use_mq
                 logger.log_info('Initialize produce rabbit MQ,routing key: mysql')
-                self.mq_query = RabbitMQ(conn_params=LinkConfig.rqmconn, exchange='backup', routing_key='mysql')
+                self.mq_query = RabbitMQ(conn_params=LinkConfig.rabbitmq_connect, exchange='backup', routing_key='mysql')
                 logger.log_info('Initialize produce rabbit MQ,routing key: mysql')
-                self.mq_rsync = RabbitMQ(conn_params=LinkConfig.rqmconn, exchange='backup', routing_key='rsync')
+                self.mq_rsync = RabbitMQ(conn_params=LinkConfig.rabbitmq_connect, exchange='backup', routing_key='rsync')
         except Exception as e:
             logger.log_error("class %s initialization fail: %s" % (DataBackup.__name__, e.message))
             exit()
@@ -684,7 +685,13 @@ class DataBackup(object):
     @logit('Search database serives >> %s')
     def get_pending_services(self, select_engine=None, select_port=None):
         conditions = list(set(self._support_db).intersection([select_engine])) if select_engine else self._support_db
-        choiced_proc = [proc for proc in psutil.process_iter() if proc.name() in conditions]
+        choiced_proc = []
+        for proc in psutil.process_iter():
+            try:
+                if proc.name() in conditions:
+                    choiced_proc.append(proc)
+            except:
+                continue
         for proc in choiced_proc:
             try:
                 proc_name = proc.name()
@@ -810,7 +817,7 @@ class RabbitMQ(object):
                     if item and item.is_open: item.close()
                 self._channels.pop(corr_id)
         except Exception as e:
-            print e.message
+            logger.log_error("close rabbit channel:%s" % e.message)
 
 
     @logit('Send message to rabbit mq >> %s')
@@ -871,7 +878,8 @@ class RabbitMQ(object):
         ch.basic_consume(self._do_request, queue=queue_request, no_ack=not ack)
         try:
             ch.start_consuming()
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as e:
+            logger.log_error("rabbitmq consumer:%s" % e.message)
             ch.stop_consuming()
         finally:
             self.close_channel(corr_id)
@@ -913,20 +921,28 @@ class ComplexEncoder(json.JSONEncoder):
 
 class CallbackMQ(object):
     @classmethod
-    def clean_exists_process(cls, proc_name):
-        cur_pid = os.getpid()
-        logger.log_info("Current Thread Pid: %s" % cur_pid)
-        logger.log_info("Searching same name process for %s" % proc_name)
-        for proc in psutil.process_iter():
-            pinfo = proc.as_dict(['pid', 'name', 'ppid'])
-            if pinfo['name'] == proc_name and pinfo['pid'] != cur_pid:
-                logger.log_info("Kill old process:%s" % proc)
-                proc.kill()
-                if pinfo['ppid']:
-                    pproc = proc.parent()
-                    if string.find(' '.join(pproc.cmdline()), proc_name) != -1:
-                        logger.log_info("Kill old parent processs:%s" % pproc)
-                        pproc.kill()
+    def clean_exists_process(cls, proc_name,exclude=[]):
+        import re
+        try:
+            cur_pid = os.getpid()
+            logger.log_info("Current Thread Pid: %s" % cur_pid)
+            logger.log_info("Searching same name process for %s" % proc_name)
+            for proc in psutil.process_iter():
+                if len(exclude)>0 and re.search("(%s)" % '|'.join(exclude),' '.join(proc.cmdline())):
+                    continue
+                pinfo = proc.as_dict(['pid', 'name', 'ppid'])
+                if pinfo['name'] == proc_name and pinfo['pid'] != cur_pid:
+                    logger.log_info("Kill old process:%s" % proc)
+                    proc.kill()
+                    if pinfo['ppid']:
+                        pproc = proc.parent()
+                        if string.find(' '.join(pproc.cmdline()), proc_name) != -1:
+                            if len(exclude)>0 and re.search("(%s)" % '|'.join(exclude),' '.join(pproc.cmdline())):
+                                continue
+                            logger.log_info("Kill old parent processs:%s" % pproc)
+                            pproc.kill()
+        except Exception as e:
+            logger.log_error("clean process" % e.message)
 
 
     @classmethod
@@ -1004,7 +1020,7 @@ class CallbackMQ(object):
 
         sql = cls.load_json(body)
         if not sql.has_key('query'): raise Exception('the json miss some query information:\n%s' % body)
-        dbconn = MySQLdb.connect(**LinkConfig.mysqlConn)
+        dbconn = MySQLdb.connect(**LinkConfig.info_connect)
         cur = dbconn.cursor()
         logger.log_info(sql['query'])
         count = cur.execute(sql['query'], sql['params'] if sql.has_key('params') else None)
@@ -1130,6 +1146,55 @@ def cli(args):
     #
     return parser.parse_args(args)
 
+def basic_daemonize():
+    # See http://www.erlenstar.demon.co.uk/unix/faq_toc.html#TOC16
+    if os.fork():   # launch child and...
+        os._exit(0) # kill off parent
+    os.setsid()
+    if os.fork():   # launch child and...
+        os._exit(0) # kill off parent again.
+    os.umask(022)   # Don't allow others to write
+    null=os.open('/dev/null', os.O_RDWR)
+    for i in range(3):
+        try:
+            os.dup2(null, i)
+        except OSError, e:
+            if e.errno != errno.EBADF:
+                raise
+    os.close(null)
+
+
+def writePID(pidfile):
+    open(pidfile,'wb').write(str(os.getpid()))
+    if not os.path.exists(pidfile):
+        raise Exception( "pidfile %s does not exist" % pidfile )
+
+
+def checkPID(pidfile):
+    if not pidfile:
+        return
+    if os.path.exists(pidfile):
+        try:
+            pid = int(open(pidfile).read())
+        except ValueError:
+            sys.exit('Pidfile %s contains non-numeric value' % pidfile)
+        try:
+            os.kill(pid, 0)
+        except OSError, why:
+            if why[0] == errno.ESRCH:
+                # The pid doesnt exists.
+                print('Removing stale pidfile %s' % pidfile)
+                os.remove(pidfile)
+            else:
+                sys.exit("Can't check status of PID %s from pidfile %s: %s" %
+                         (pid, pidfile, why[1]))
+        else:
+            sys.exit("Another server is running, PID %s\n" %  pid)
+
+def daemonize(pidfile):
+    checkPID(pidfile)
+    basic_daemonize()
+    writePID(pidfile)
 
 if __name__ == '__main__':
     if sys.version.split('.')[:2] < ['2', '7']:
@@ -1146,7 +1211,7 @@ if __name__ == '__main__':
         if namespace.action == 'backup':
             if not namespace.store_path:
                 raise Exception("Must provide the path to save backup files")
-            CallbackMQ.clean_exists_process(os.path.basename(sys.argv[0]))
+            CallbackMQ.clean_exists_process(os.path.basename(sys.argv[0]),['rsync_center','query_center'])
             logger.log_info("Start backup process")
             bak = DataBackup(namespace.store_path, use_mq=True)
             if bak:
@@ -1158,22 +1223,28 @@ if __name__ == '__main__':
             logger.log_info("End backup process")
         elif namespace.action == 'log_center':
             logger.log_info('staring log center, deal backup logs')
-            query_mq = RabbitMQ(conn_params=LinkConfig.rqmconn, exchange='backup', routing_key='log')
+            query_mq = RabbitMQ(conn_params=LinkConfig.rabbitmq_connect, exchange='backup', routing_key='log')
             logger.log_info('=>start consuming from rabbit mq.(stop Ctrl+C)')
             query_mq.consumer(ack=False, fn_respond=CallbackMQ.deal_log)
             logger.log_info('log center finished.')
         elif namespace.action == 'rsync_center':
             if not namespace.store_path:
                 raise Exception("Must provide the path to save backup files")
+            # make daemon
+            if not namespace.debug:
+                daemonize(os.path.join(os.path.dirname(sys.argv[0]), namespace.action + '.pid'))
             logger.log_info('staring rsync center, rsync backup file from db server')
-            query_mq = RabbitMQ(conn_params=LinkConfig.rqmconn, exchange='backup', routing_key='rsync')
+            query_mq = RabbitMQ(conn_params=LinkConfig.rabbitmq_connect, exchange='backup', routing_key='rsync')
             logger.log_info('=>start consuming from rabbit mq.(stop Ctrl+C)')
             query_mq.consumer(ack=True, fn_respond=CallbackMQ.deal_rsync, clientip=clientip,
                               store_path=namespace.store_path)
             logger.log_info('rsync center finished.')
         elif namespace.action == 'query_center':
+            #make daemon
+            if not namespace.debug:
+                daemonize(os.path.join(os.path.dirname(sys.argv[0]), namespace.action + '.pid'))
             logger.log_info('staring query center, used deal sql query')
-            query_mq = RabbitMQ(conn_params=LinkConfig.rqmconn, exchange='backup', routing_key='mysql')
+            query_mq = RabbitMQ(conn_params=LinkConfig.rabbitmq_connect, exchange='backup', routing_key='mysql')
             logger.log_info('=>start consuming from rabbit mq.(stop Ctrl+C)')
             query_mq.consumer(ack=True, fn_respond=CallbackMQ.deal_sql)
             logger.log_info('query center finished.')
